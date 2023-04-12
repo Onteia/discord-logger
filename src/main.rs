@@ -251,6 +251,9 @@ async fn setup_bot() {
 
 //turn (#channel, @user, timestamp) into a color
 fn color_hash(channel_name: &String, username: &String, time: Timestamp) -> u32 {
+    
+    const TIMESTAMP_WEIGHT: u32 = 100;
+
     let mut hasher = DefaultHasher::new();
     channel_name.hash(&mut hasher);
     username.hash(&mut hasher);
@@ -259,9 +262,12 @@ fn color_hash(channel_name: &String, username: &String, time: Timestamp) -> u32 
     const SECONDS_IN_DAY: i64 = 86400;
     let beginning_of_day = time.unix_timestamp() - (time.unix_timestamp() % SECONDS_IN_DAY);
     let secs_of_day = time.unix_timestamp() - beginning_of_day;
+    const MASK_TO_U32: i64 = 0x00000000FFFFFFFF;
+    let secs_of_day: u32 = (secs_of_day & MASK_TO_U32).try_into()
+        .expect("color_hash(): unable to convert masked secs_of_day to u32");
 
-    secs_of_day.to_string().hash(&mut hasher);
-    let hashed_val = hasher.finish() as u32;
+    //hash so the color value increases linearly with the timestamp
+    let hashed_val = (hasher.finish() as u32) + (TIMESTAMP_WEIGHT * secs_of_day);
     //get it as a u24 (get rid of first 8 bits)
     let result = hashed_val & 0x00FFFFFF;
     result
