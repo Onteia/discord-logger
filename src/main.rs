@@ -1,13 +1,19 @@
 
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::path::Path;
 use std::collections::HashMap;
 use serenity::async_trait;
+use serenity::model::Timestamp;
+use serenity::model::prelude::MessageUpdateEvent;
 use serenity::prelude::*;
 use serenity::Client;
 use serenity::model::prelude::Ready;
 use serenity::model::channel::Message;
 use serenity::model::gateway::Activity;
+use serenity::utils::Color;
 use serde::{Serialize, Deserialize};
 
 
@@ -39,7 +45,7 @@ impl EventHandler for Handler {
         ctx.set_activity(activity).await;
     }
     
-    // when a user sends a message
+    //when a user sends a message
     async fn message(&self, ctx: Context, msg: Message) {
 
         //ignore messages from MessageLogger
@@ -48,12 +54,12 @@ impl EventHandler for Handler {
         }
 
         let g_id = msg.guild_id
-            .expect("unable to get the guild_id!")
+            .expect("message(): unable to get the guild_id!")
             .to_string();
 
         //read from json file
         let contents = fs::read_to_string(JSON_PATH)
-            .expect("unable to read the json file!");
+            .expect("message(): unable to read the json file!");
         
         let mut save_map: HashMap<String, u64>;
         //if the json file is empty, initialize the hash map
@@ -62,7 +68,7 @@ impl EventHandler for Handler {
             save_map = HashMap::new();
         } else {
             save_map = serde_json::from_str::<SaveMap>(&contents)
-                .expect("unable to convert the json file to a SaveMap!").map;
+                .expect("message(): unable to convert the json file to a SaveMap!").map;
         }
 
         if msg.content.starts_with("!setuplogging") {
@@ -99,22 +105,24 @@ impl EventHandler for Handler {
 
         //get the channel id associated with the guild id
         let c_id = *save_map.get(&g_id)
-            .expect("unable to get the channel id from the hash map!");
+            .expect("message(): unable to get the channel id from the hash map!");
         //turn the c_id into a guild channel
-        let g_channel = ctx.http.get_channel(c_id).await
-            .expect("unable to get the channel!")
-            .guild().expect("unable to get the guild channel!");
+        let log_channel = ctx.http.get_channel(c_id).await
+            .expect("message(): unable to get the channel!")
+            .guild().expect("message(): unable to get the guild channel!");
         
-        let author = &msg.author.name;
+        let author = msg.author.name.clone();
         let link = msg.link();
         
         //get the channel name to format it as: `#channel_name` in the embed
         let guild_channel = msg.channel(&ctx).await
-            .expect("unable to get the channel from the message!")
-            .guild().expect("unable to get the guild from the channel!");
+            .expect("message(): unable to get the channel from the message!")
+            .guild().expect("message(): unable to get the guild from the channel!");
         let channel_name = "#".to_owned() + guild_channel.name();
+        let time = msg.timestamp;
+        let display_color = color_hash(&channel_name, &author, time);
 
-        g_channel.send_message(
+        log_channel.send_message(
             &ctx, 
             |reply| {
                 reply.add_embed(|e| {
@@ -122,12 +130,91 @@ impl EventHandler for Handler {
                     e.url(link);
                     e.description(channel_name);
                     e.field("posted:", msg.content, false);
-                    e.timestamp(msg.timestamp)
+                    e.timestamp(time);
+                    e.color(Color::new(display_color))
                 })
             })
         .await
         .unwrap();
     }
+
+    //when a message is updated
+    async fn message_update(&self, ctx: Context, updated: MessageUpdateEvent) {
+        
+        let author = updated.author
+            .expect("message_update(): unable to get author!");
+
+        //ignore messages from MessageLogger
+        if author.bot && author.name == LOGGER_NAME {
+            return;
+        }
+
+        let g_id = updated.guild_id
+            .expect("message_update(): unable to get the guild_id!")
+            .to_string();
+
+        //read from json file
+        let contents = fs::read_to_string(JSON_PATH)
+            .expect("message_update(): unable to read the json file!");
+        
+        let save_map: HashMap<String, u64>;
+        //if the json file is empty, initialize the hash map
+        //deserialize existing json file otherwise
+        if contents == "" {
+            save_map = HashMap::new();
+        } else {
+            save_map = serde_json::from_str::<SaveMap>(&contents)
+                .expect("message_update(): unable to convert the json file to a SaveMap!").map;
+        }
+
+        //ignore messages if logging not set up
+        if !save_map.contains_key(&g_id) {
+            return;
+        }
+
+        //get the channel id associated with the guild id
+        let c_id = *save_map.get(&g_id)
+            .expect("message_update(): unable to get the channel id from the hash map!");
+        //turn the c_id into a guild channel
+        let log_channel = ctx.http.get_channel(c_id).await
+            .expect("message_update(): unable to get the channel!")
+            .guild().expect("message_update(): unable to get the guild channel!");
+        
+        let author = author.name;
+        let link = "https://discord.com/channels/".to_owned() 
+            + &g_id + "/" + c_id.to_string().as_str() 
+            + "/" + updated.id.to_string().as_str();
+        
+        //get the channel name to format it as: `#channel_name` in the embed
+        let channels = updated.guild_id   //.channel(&ctx).await
+            .expect("message_update(): unable to get the guild from the message!")
+            .channels(&ctx).await.expect("message_update(): unable to get the channel from the guild");
+        let guild_channel = channels.get(&updated.channel_id)
+            .expect("message_update(): unable to get guild from channel!");
+        let channel_name = "#".to_owned() + guild_channel.name();
+        let updated_text = updated.content
+            .expect("message_update(): unable to get the updated message!");
+        let time = updated.timestamp.unwrap();
+        let display_color = color_hash(&channel_name, &author, time);
+
+        log_channel.send_message(
+            &ctx, 
+            |reply| {
+                reply.add_embed(|e| {
+                    e.title(author);
+                    e.url(link);
+                    e.description(channel_name);
+                    e.field("edited:", updated_text, false);
+                    e.timestamp(updated.edited_timestamp.unwrap());
+                    e.color(Color::new(display_color))
+                })
+            })
+        .await
+        .unwrap();
+
+        
+    }
+
 }
 
 
@@ -160,4 +247,22 @@ async fn setup_bot() {
     if let Err(why) = client.start().await {
         println!("an error occurred while running the client: {:?}", why);
     }
+}
+
+//turn (#channel, @user, timestamp) into a color
+fn color_hash(channel_name: &String, username: &String, time: Timestamp) -> u32 {
+    let mut hasher = DefaultHasher::new();
+    channel_name.hash(&mut hasher);
+    username.hash(&mut hasher);
+
+    //get the number of seconds since the beginning of the day
+    const SECONDS_IN_DAY: i64 = 86400;
+    let beginning_of_day = time.unix_timestamp() - (time.unix_timestamp() % SECONDS_IN_DAY);
+    let secs_of_day = time.unix_timestamp() - beginning_of_day;
+
+    secs_of_day.to_string().hash(&mut hasher);
+    let hashed_val = hasher.finish() as u32;
+    //get it as a u24 (get rid of first 8 bits)
+    let result = hashed_val & 0x00FFFFFF;
+    result
 }
