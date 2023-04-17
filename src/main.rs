@@ -24,25 +24,24 @@ use serde_json::Error;
 
 const DISCORD_AUTH_PATH: &'static str = "discord.auth";
 const JSON_PATH: &'static str = "./servers.json";
+//Clueless just assume tag won't change 
 const LOGGER_TAG: &'static str = "MessageLogger#0584";
+
+const INIT_LOG: &'static str = "setuplogging";
+const END_LOG: &'static str = "removelogging";
+
 
 /*TODO: 
     
-    ~change bot check to use tag
-    ~include pfp in log
-
     properly log embeds
     possibly proper gif rendering
         because the gifs are cached and they could get removed from the cdn
     proper attachment logging
 
-    add a command to remove logging
+    ~add a command to remove logging
     delete log of server when bot is kicked
 
     show the user's pfp in the embed
-
-    color hash with full discord tag
-
 
 */
 
@@ -62,28 +61,42 @@ impl EventHandler for Handler {
         let activity = Activity::playing("/setuplogging");
         ctx.set_activity(activity).await;
     
-        let _setuplogging = Command::create_global_application_command(&ctx, |command| {
-            command.name("setuplogging");
-            command.description("setup logging for this channel");
-            command.default_member_permissions(Permissions::MANAGE_GUILD)
-        }).await;
-    
+        let _init_log = Command::create_global_application_command(
+            &ctx, 
+            |command| {
+                command.name(INIT_LOG);
+                command.description("setup logging for this channel");
+                command.default_member_permissions(Permissions::MANAGE_GUILD)
+            }
+        ).await;
+
+        let _end_log = Command::create_global_application_command(
+            &ctx, 
+            |command| {
+                command.name(END_LOG);
+                command.description("remove logging for your server");
+                command.default_member_permissions(Permissions::MANAGE_GUILD)
+            }
+        ).await;
+
     }
     
     //handle interactions
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-
+        
         //handle slash commands
         if interaction.kind() == InteractionType::ApplicationCommand {
             let slash_command = interaction.application_command()
                 .expect("interaction_create(): unable to convert the interaction 
                 to an application command!");
             
-            if slash_command.data.name == "setuplogging" {
+            let command_name = slash_command.data.name.clone();
+
+            if command_name == INIT_LOG {
                 //get current channel id
                 let c_id = *slash_command.channel_id.as_u64();
                 let g_id_str = slash_command.guild_id
-                    .expect("interaction_create(): unable to get the guild_id!")
+                    .expect((INIT_LOG.to_owned() + ": unable to get the guild_id!").as_str())
                     .to_string();
 
                 //update the save_map with the new server,channel pair
@@ -91,7 +104,7 @@ impl EventHandler for Handler {
                 save_map.insert(g_id_str, c_id);
                 
                 write_json(&save_map)
-                    .expect("interaction_create(): unable to write to the json file!");
+                    .expect((INIT_LOG.to_owned() + ": unable to write to json file!").as_str());
 
                 slash_command
                     .create_interaction_response(
@@ -99,23 +112,68 @@ impl EventHandler for Handler {
                         |reply| {
                             reply.interaction_response_data(|message| {
                                 message.content("logging has been successfully set up for this channel!")
+                        })
                     })
-                })
-                .await
-                .unwrap();
+                    .await
+                    .unwrap();
 
                 return;
             }
+       
+            if command_name == END_LOG {
+                let g_id_str: String = slash_command.guild_id
+                    .expect((END_LOG.to_owned() + ": unable to get the guild_id!").as_str())
+                    .to_string();
+                
+                let mut map = read_json();
+                
+                //if logging isn't set up, send failure message
+                if !map.contains_key(&g_id_str) {
+                    slash_command
+                        .create_interaction_response(
+                            &ctx, 
+                            |reply| {
+                                reply.interaction_response_data(|message| {
+                                message.content("logging has not been set up yet for your server!")
+                            })
+                        })
+                        .await
+                        .unwrap();
+                    
+                    return;
+                }
+            
+                //remove from map and update json
+                map.remove(&g_id_str);
+                write_json(&map)
+                    .expect((END_LOG.to_owned() + ": unable to write to json file!").as_str());
+
+                //send success message
+                slash_command
+                    .create_interaction_response(
+                        &ctx, 
+                        |reply| {
+                            reply.interaction_response_data(|message| {
+                                message.content("logging successfully stopped for this server!")
+                        })
+                    })
+                    .await
+                    .unwrap();
+            
+                return;
+            }
+       
         }
 
     }
 
     //when a user sends a message
     async fn message(&self, ctx: Context, msg: Message) {
+        
         let author = msg.author.clone();
 
         //ignore messages from MessageLogger
-        if author.bot && author.tag() == LOGGER_TAG {
+        if author.bot && author.tag().as_str() == LOGGER_TAG {
             return;
         }
 
@@ -174,7 +232,7 @@ impl EventHandler for Handler {
             .expect("message_update(): unable to get author!");
 
         //ignore messages from MessageLogger
-        if author.bot && author.tag() == LOGGER_TAG {
+        if author.bot && author.tag().as_str() == LOGGER_TAG {
             return;
         }
 
@@ -233,11 +291,7 @@ impl EventHandler for Handler {
             })
         .await
         .unwrap();
-
-        
     }
-
-
 }
 
 
@@ -270,6 +324,7 @@ async fn setup_bot() {
     if let Err(why) = client.start().await {
         println!("an error occurred while running the client: {:?}", why);
     }
+
 }
 
 fn read_json() -> HashMap<String, u64> {
