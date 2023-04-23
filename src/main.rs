@@ -11,6 +11,7 @@ use serenity::model::prelude::MessageUpdateEvent;
 use serenity::model::application::command::Command;
 use serenity::model::application::interaction::Interaction;
 use serenity::model::application::interaction::InteractionType;
+use serenity::model::guild::UnavailableGuild;
 use serenity::prelude::*;
 use serenity::Client;
 use serenity::model::permissions::Permissions;
@@ -32,16 +33,15 @@ const END_LOG: &'static str = "removelogging";
 
 
 /*TODO: 
-    
+
     move icon to be like an author icon
-    hopefully fix panicking thread in updated_message
 
     properly log embeds
     possibly proper gif rendering
         because the gifs are cached and they could get removed from the cdn
     proper attachment logging
 
-    delete log of server when bot is kicked
+    ~delete log of server when bot is kicked
 
 */
 
@@ -57,10 +57,12 @@ struct Handler;
 impl EventHandler for Handler {
 
     //when MessageLogger starts
-    async fn ready(&self, ctx: Context, _data_about_bot: Ready) {
-        let activity = Activity::playing(INIT_LOG);
+    async fn ready(&self, ctx: Context, data_about_bot: Ready) {
+        let activity = Activity::playing("/".to_owned() + INIT_LOG);
         ctx.set_activity(activity).await;
     
+        sync_json(data_about_bot.guilds).unwrap();
+
         let _init_log = Command::create_global_application_command(
             &ctx, 
             |command| {
@@ -155,37 +157,6 @@ impl EventHandler for Handler {
                             .unwrap();
                     }
                 }
-                
-                //if logging isn't set up, send failure message
-                // if !map.contains_key(&g_id_str) {
-                //     slash_command
-                //         .create_interaction_response(
-                //             &ctx, 
-                //             |reply| {
-                //                 reply.interaction_response_data(|message| {
-                //                 message.content("logging has not been set up yet for your server!")
-                //             })
-                //         })
-                //         .await
-                //         .unwrap();
-                    
-                //     return;
-                // }
-            
-                
-
-                //send success message
-                // slash_command
-                //     .create_interaction_response(
-                //         &ctx, 
-                //         |reply| {
-                //             reply.interaction_response_data(|message| {
-                //                 message.content("logging successfully stopped for this server!")
-                //         })
-                //     })
-                //     .await
-                //     .unwrap();
-            
                 return;
             }
        
@@ -255,9 +226,6 @@ impl EventHandler for Handler {
     //when a message is updated
     async fn message_update(&self, ctx: Context, updated: MessageUpdateEvent) {
         
-        // let author = updated.author
-        //     .expect("message_update(): unable to get author!");
-
         let author = match updated.author {
             Some(user) => user,
             None => return
@@ -358,7 +326,6 @@ async fn setup_bot() {
     if let Err(why) = client.start().await {
         println!("an error occurred while running the client: {:?}", why);
     }
-
 }
 
 fn read_json() -> Result<HashMap<String, u64>, std::io::Error> {
@@ -382,6 +349,26 @@ fn write_json(save_map: &HashMap<String, u64>) -> Result<(), std::io::Error> {
     let serialized = serde_json::to_string(&save_map)
         .expect("write_json(): unable to serialize the save_map!");
     fs::write(JSON_PATH, &serialized)?;
+    Ok(())
+}
+
+//deletes entries in the json file if MessageLogger isn't in the server
+fn sync_json(guild_list: Vec<UnavailableGuild>) -> Result<(), std::io::Error> {
+    let mut map = read_json()?;
+    map.iter_mut().for_each(|pair| {
+        let mut exists = false;
+        //iterate through guild list
+        guild_list.iter().for_each(|guild| {
+            if !exists && &guild.id.0.to_string() == pair.0 {
+                exists = true;
+            }
+        });
+        //delete entry if not found in the guild list
+        if !exists {
+            delete_entry(&pair.0);
+        }
+    });
+
     Ok(())
 }
 
@@ -418,3 +405,4 @@ fn delete_entry(g_id: &String) -> Option<u64> {
     write_json(&map).unwrap();
     return_val
 }
+
