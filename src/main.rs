@@ -41,8 +41,6 @@ const END_LOG: &'static str = "removelogging";
         because the gifs are cached and they could get removed from the cdn
     proper attachment logging
 
-    ~delete log of server when bot is kicked
-
 */
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -58,6 +56,8 @@ impl EventHandler for Handler {
 
     //when MessageLogger starts
     async fn ready(&self, ctx: Context, data_about_bot: Ready) {
+        println!("{LOGGER_TAG} is ready");
+        
         let activity = Activity::playing("/".to_owned() + INIT_LOG);
         ctx.set_activity(activity).await;
     
