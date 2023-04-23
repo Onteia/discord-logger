@@ -33,15 +33,15 @@ const END_LOG: &'static str = "removelogging";
 
 /*TODO: 
     
+    move icon to be like an author icon
+    hopefully fix panicking thread in updated_message
+
     properly log embeds
     possibly proper gif rendering
         because the gifs are cached and they could get removed from the cdn
     proper attachment logging
 
-    ~add a command to remove logging
     delete log of server when bot is kicked
-
-    show the user's pfp in the embed
 
 */
 
@@ -58,7 +58,7 @@ impl EventHandler for Handler {
 
     //when MessageLogger starts
     async fn ready(&self, ctx: Context, _data_about_bot: Ready) {
-        let activity = Activity::playing("/setuplogging");
+        let activity = Activity::playing(INIT_LOG);
         ctx.set_activity(activity).await;
     
         let _init_log = Command::create_global_application_command(
@@ -100,7 +100,8 @@ impl EventHandler for Handler {
                     .to_string();
 
                 //update the save_map with the new server,channel pair
-                let mut save_map = read_json();
+                let mut save_map = read_json()
+                    .expect((INIT_LOG.to_owned() + ": unable to read from json!").as_str());
                 save_map.insert(g_id_str, c_id);
                 
                 write_json(&save_map)
@@ -125,40 +126,65 @@ impl EventHandler for Handler {
                     .expect((END_LOG.to_owned() + ": unable to get the guild_id!").as_str())
                     .to_string();
                 
-                let mut map = read_json();
+                //remove from map and update json
+                match delete_entry(&g_id_str) {
+                    //send success message
+                    Some(_id) => {
+                        slash_command
+                            .create_interaction_response(
+                                &ctx, 
+                                |reply| {
+                                    reply.interaction_response_data(|message| {
+                                        message.content("logging successfully stopped for this server!")
+                                })
+                            })
+                            .await
+                            .unwrap();
+                    },
+                    //send error message
+                    None => {
+                        slash_command
+                            .create_interaction_response(
+                                &ctx, 
+                                |reply| {
+                                    reply.interaction_response_data(|message| {
+                                        message.content("logging has not been set up yet for your server!")
+                                })
+                            })
+                            .await
+                            .unwrap();
+                    }
+                }
                 
                 //if logging isn't set up, send failure message
-                if !map.contains_key(&g_id_str) {
-                    slash_command
-                        .create_interaction_response(
-                            &ctx, 
-                            |reply| {
-                                reply.interaction_response_data(|message| {
-                                message.content("logging has not been set up yet for your server!")
-                            })
-                        })
-                        .await
-                        .unwrap();
+                // if !map.contains_key(&g_id_str) {
+                //     slash_command
+                //         .create_interaction_response(
+                //             &ctx, 
+                //             |reply| {
+                //                 reply.interaction_response_data(|message| {
+                //                 message.content("logging has not been set up yet for your server!")
+                //             })
+                //         })
+                //         .await
+                //         .unwrap();
                     
-                    return;
-                }
+                //     return;
+                // }
             
-                //remove from map and update json
-                map.remove(&g_id_str);
-                write_json(&map)
-                    .expect((END_LOG.to_owned() + ": unable to write to json file!").as_str());
+                
 
                 //send success message
-                slash_command
-                    .create_interaction_response(
-                        &ctx, 
-                        |reply| {
-                            reply.interaction_response_data(|message| {
-                                message.content("logging successfully stopped for this server!")
-                        })
-                    })
-                    .await
-                    .unwrap();
+                // slash_command
+                //     .create_interaction_response(
+                //         &ctx, 
+                //         |reply| {
+                //             reply.interaction_response_data(|message| {
+                //                 message.content("logging successfully stopped for this server!")
+                //         })
+                //     })
+                //     .await
+                //     .unwrap();
             
                 return;
             }
@@ -181,12 +207,14 @@ impl EventHandler for Handler {
             .expect("message(): unable to get the guild_id!");
         let g_id_str = g_id.to_string();
 
-        let save_map = read_json();
+        let save_map = read_json()
+            .expect("message(): unable to read from json!");
         
         //ignore messages if logging not set up
         if !save_map.contains_key(&g_id_str) {
             return;
         }
+
 
         //get the channel id associated with the guild id
         let c_id = *save_map.get(&g_id_str)
@@ -205,8 +233,7 @@ impl EventHandler for Handler {
         let channel_name = "#".to_owned() + guild_channel.name();
         let time = msg.timestamp;
         let display_color = color_hash(&channel_name, &author.tag(), time);
-        let author_icon_url = author.avatar_url()
-            .expect("message(): unable to obtain author's profile url!");
+        let author_icon_url = author.face();
 
         log_channel.send_message(
             &ctx, 
@@ -228,8 +255,13 @@ impl EventHandler for Handler {
     //when a message is updated
     async fn message_update(&self, ctx: Context, updated: MessageUpdateEvent) {
         
-        let author = updated.author
-            .expect("message_update(): unable to get author!");
+        // let author = updated.author
+        //     .expect("message_update(): unable to get author!");
+
+        let author = match updated.author {
+            Some(user) => user,
+            None => return
+        };
 
         //ignore messages from MessageLogger
         if author.bot && author.tag().as_str() == LOGGER_TAG {
@@ -240,7 +272,8 @@ impl EventHandler for Handler {
             .expect("message_update(): unable to get the guild_id!")
             .to_string();
         
-        let save_map = read_json();
+        let save_map = read_json()
+            .expect("message_update(): unable to read from json!");
         
         //ignore messages if logging not set up
         if !save_map.contains_key(&g_id) {
@@ -255,6 +288,8 @@ impl EventHandler for Handler {
             .expect("message_update(): unable to get the channel!")
             .guild().expect("message_update(): unable to get the guild channel!");
         
+        //change c_id to be the updated message's channel id to link to message
+        //instead of the first log of the message
         let link = "https://discord.com/channels/".to_owned() 
             + &g_id + "/" + c_id.to_string().as_str() 
             + "/" + updated.id.to_string().as_str();
@@ -273,8 +308,7 @@ impl EventHandler for Handler {
         let display_color = color_hash(&channel_name, &author.tag(), time);
         let edited_time = updated.edited_timestamp
             .expect("message_update(): unable to get timestamp of edited message!");
-        let author_icon_link = author.avatar_url()
-            .expect("message_update(): unable to obtain author's profile url!");
+        let author_icon_url = author.face();
 
         log_channel.send_message(
             &ctx, 
@@ -286,7 +320,7 @@ impl EventHandler for Handler {
                     e.field("edited:", updated_text, false);
                     e.timestamp(edited_time);
                     e.color(Color::new(display_color));
-                    e.thumbnail(author_icon_link)
+                    e.thumbnail(author_icon_url)
                 })
             })
         .await
@@ -327,10 +361,9 @@ async fn setup_bot() {
 
 }
 
-fn read_json() -> HashMap<String, u64> {
+fn read_json() -> Result<HashMap<String, u64>, std::io::Error> {
     //read from json file
-    let contents = fs::read_to_string(JSON_PATH)
-        .expect("read_json(): unable to read the json file!");
+    let contents = fs::read_to_string(JSON_PATH)?;
 
     let map: Result<SaveMap, Error>;
     //if the json file is empty, initialize the hash map
@@ -341,7 +374,7 @@ fn read_json() -> HashMap<String, u64> {
     } else {
         map = serde_json::from_str::<SaveMap>(&contents);
     }
-    map.expect("read_json(): unable to convert the json file to a SaveMap!").map
+    Ok(map.unwrap().map)
 }
 
 fn write_json(save_map: &HashMap<String, u64>) -> Result<(), std::io::Error> {
@@ -354,7 +387,6 @@ fn write_json(save_map: &HashMap<String, u64>) -> Result<(), std::io::Error> {
 
 //turn (#channel, @user, timestamp) into a color
 fn color_hash(channel_name: &String, user: &String, time: Timestamp) -> u32 {
-   
     const TIMESTAMP_WEIGHT: u32 = 100;
 
     let mut hasher = DefaultHasher::new();
@@ -375,4 +407,14 @@ fn color_hash(channel_name: &String, user: &String, time: Timestamp) -> u32 {
     //get it as a u24 (get rid of first 8 bits)
     let result = hashed_val & 0x00FFFFFF;
     result
+}
+
+//deletes the guild_id-channel_id pair from the json file if guild_id exists
+fn delete_entry(g_id: &String) -> Option<u64> {
+    let mut map = read_json().unwrap();
+    //remove the entry from the map if it exists
+    let return_val = map.remove(g_id);
+    //update the json file
+    write_json(&map).unwrap();
+    return_val
 }
