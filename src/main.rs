@@ -34,8 +34,6 @@ const END_LOG: &'static str = "removelogging";
 
 /*TODO: 
 
-    move icon to be like an author icon
-
     properly log embeds
     possibly proper gif rendering
         because the gifs are cached and they could get removed from the cdn
@@ -204,19 +202,24 @@ impl EventHandler for Handler {
         let channel_name = "#".to_owned() + guild_channel.name();
         let time = msg.timestamp;
         let display_color = color_hash(&channel_name, &author.tag(), time);
-        let author_icon_url = author.face();
+        let nickname = match author.nick_in(&ctx, g_id).await {
+            Some(nick) => nick,
+            None => author.name.clone()
+        };
 
         log_channel.send_message(
             &ctx, 
             |reply| {
                 reply.add_embed(|e| {
-                    e.title(author.tag());
+                    e.title(channel_name);
                     e.url(link);
-                    e.description(channel_name);
                     e.field("posted:", msg.content, false);
                     e.timestamp(time);
                     e.color(Color::new(display_color));
-                    e.thumbnail(author_icon_url)
+                    e.author(|a| {
+                        a.icon_url(author.face());
+                        a.name(nickname)
+                    })
                 })
             })
         .await
@@ -276,19 +279,28 @@ impl EventHandler for Handler {
         let display_color = color_hash(&channel_name, &author.tag(), time);
         let edited_time = updated.edited_timestamp
             .expect("message_update(): unable to get timestamp of edited message!");
-        let author_icon_url = author.face();
+
+        let nickname = match author.nick_in(
+            &ctx, 
+            u64::from_str_radix(&g_id, 10)
+                .unwrap()).await {
+                    Some(nick) => nick,
+                    None => author.name.clone()
+                };
 
         log_channel.send_message(
             &ctx, 
             |reply| {
                 reply.add_embed(|e| {
-                    e.title(author.tag());
+                    e.title(channel_name);
                     e.url(link);
-                    e.description(channel_name);
                     e.field("edited:", updated_text, false);
                     e.timestamp(edited_time);
                     e.color(Color::new(display_color));
-                    e.thumbnail(author_icon_url)
+                    e.author(|a| {
+                        a.icon_url(author.face());
+                        a.name(nickname)
+                    })
                 })
             })
         .await
