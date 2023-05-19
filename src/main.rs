@@ -10,6 +10,7 @@ use serenity::model::gateway::Activity;
 use serenity::model::guild::UnavailableGuild;
 use serenity::model::permissions::Permissions;
 use serenity::model::prelude::Attachment;
+use serenity::model::prelude::AttachmentType;
 use serenity::model::prelude::GuildChannel;
 use serenity::model::prelude::MessageUpdateEvent;
 use serenity::model::prelude::Ready;
@@ -17,6 +18,7 @@ use serenity::model::Timestamp;
 use serenity::prelude::*;
 use serenity::utils::Color;
 use serenity::Client;
+use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs;
@@ -33,12 +35,8 @@ const INIT_LOG: &'static str = "setuplogging";
 const END_LOG: &'static str = "removelogging";
 
 /*TODO:
-    line 233
-
-    proper attachment logging
-
-    possibly proper gif rendering
-        because the gifs are cached and they could get removed from the cdn
+    properly log replies to other messages
+    maybe also try splitting messages that are longer than field limit
 */
 
 enum MessageType {
@@ -215,18 +213,16 @@ impl EventHandler for Handler {
         let channel_name = "#".to_owned() + guild_channel.name();
         let time = msg.timestamp;
         let display_color = color_hash(&channel_name, &author.tag(), time);
-        
+
         let nickname = match author.nick_in(&ctx, g_id).await {
             Some(nick) => nick,
             None => author.name.clone(),
         };
 
         let face = match g_id.member(&ctx, author.id).await {
-            Ok(m) => {
-                match m.avatar_url() {
-                    Some(url) => url,
-                    None => author.face(),
-                }
+            Ok(m) => match m.avatar_url() {
+                Some(url) => url,
+                None => author.face(),
             },
             Err(_) => author.face(),
         };
@@ -260,9 +256,10 @@ impl EventHandler for Handler {
             return;
         }
 
-        let g_id = updated.guild_id
+        let g_id = updated
+            .guild_id
             .expect("message_update(): unable to get the guild_id!");
-        
+
         let g_id_str = g_id.to_string();
 
         let save_map = read_json().expect("message_update(): unable to read from json!");
@@ -325,11 +322,9 @@ impl EventHandler for Handler {
         };
 
         let face = match g_id.member(&ctx, author.id).await {
-            Ok(m) => {
-                match m.avatar_url() {
-                    Some(url) => url,
-                    None => author.face(),
-                }
+            Ok(m) => match m.avatar_url() {
+                Some(url) => url,
+                None => author.face(),
             },
             Err(_) => author.face(),
         };
@@ -466,18 +461,66 @@ fn delete_entry(g_id: &String) -> Option<u64> {
 }
 
 async fn log_message(log_info: LogInfo) {
-
     let embed = create_embed(&log_info);
+    let attachments = match log_info.attachments{
+        Some(list) => list,
+        None => vec![],
+    };
+    
+    let images = extract_images(&attachments);
+    let files = extract_nonimages(&attachments);
 
-    log_info.log_channel.send_message(
-        log_info.ctx, 
-        |r| {
-            r.set_embed(embed)
+    if files.len() == 0 {
+        log_info
+            .log_channel
+            .send_message(&log_info.ctx, |r| {
+                if images.len() <= 1 {
+                    return r.set_embed(embed);
+                } else {
+                    let mut embeds = vec![embed];
+                    // set image embeds for all images except first
+                    // because first image is part of the first embed
+                    for index in 1..images.len() {
+                        embeds.push(create_image_embed(&images[index], log_info.msg_link.clone()));
+                    }
+                    return r.add_embeds(embeds);
+                }
+            })
+            .await
+            .unwrap();
+    } else {
+        let mut to_upload: Vec<AttachmentType> = vec![];
+        for file in files {
+            let bytes = match file.download().await {
+                Ok(b) => b,
+                Err(_) => vec![], 
+            };
+
+            let at: AttachmentType = AttachmentType::Bytes {
+                data: Cow::Owned(bytes), 
+                filename: file.filename.clone() 
+            };
+            to_upload.push(at);
         }
 
-        
-    ).await.unwrap();
-
+        log_info
+            .log_channel
+            .send_files(&log_info.ctx, to_upload, |r| {
+                if images.len() <= 1 {
+                    return r.set_embed(embed);
+                } else {
+                    let mut embeds = vec![embed];
+                    // set image embeds for all images except first
+                    // because first image is part of the first embed
+                    for index in 1..images.len() {
+                        embeds.push(create_image_embed(&images[index], log_info.msg_link.clone()));
+                    }
+                    return r.add_embeds(embeds);
+                }
+            })
+            .await
+            .unwrap();
+    }
 }
 
 fn create_embed(log_info: &LogInfo) -> CreateEmbed {
@@ -485,11 +528,18 @@ fn create_embed(log_info: &LogInfo) -> CreateEmbed {
         MessageType::POSTED => "posted:",
         MessageType::EDITED => "edited:",
     };
-    
+
+    let mut msg = log_info.message_content.clone();
+    if msg.len() > 1024 {
+        msg.truncate(1021);
+        msg = msg + "...";
+    }
+
     let mut embed = CreateEmbed::default();
-    embed.url(&log_info.msg_link)
+    embed
+        .url(&log_info.msg_link)
         .title(&log_info.channel_name)
-        .field(field_name, &log_info.message_content, false)
+        .field(field_name, msg, false)
         .timestamp(log_info.time_sent)
         .color(log_info.color)
         .author(|a| {
@@ -497,28 +547,44 @@ fn create_embed(log_info: &LogInfo) -> CreateEmbed {
             a.icon_url(&log_info.author_face)
         });
 
-    embed.clone()
+    // log the first image attachment in this embed so all images are logged
+    let images = extract_images(log_info.attachments.as_ref().unwrap());
+    if images.len() > 0 {
+        // set first image as this embed's displayed image
+        embed.field("with image(s):", "", false);
+        embed.image(images[0].url.clone());
+    }
+    embed
 }
 
-// async fn send_attachments<'a>(ctx: &Context, channel: &GuildChannel, msg: &Message) -> 
-//     Result<(Vec<String>, Option<Vec<AttachmentType<'a>>>), SerenityError> {
-//     let mut names: Vec<String> = Vec::new();
-//     if msg.attachments.len() == 0 {
-//         return Ok((names, None));
-//     }
-//     let mut files: Vec<AttachmentType> = Vec::new();
-//     for attachment in &msg.attachments {
-//         let bytes = attachment.download().await?;
-//         let name = attachment.filename.clone();
-//         let file = AttachmentType::Bytes {
-//             data: Cow::Borrowed(&*bytes),
-//             filename: name.clone(),
-//         };
-//         names.push(name);
-//         files.push(file.clone());
-//         let file = vec![file];
-//         //channel.send_files(ctx, file, |f| f).await?;
-//     }
+fn create_image_embed(attachment: &Attachment, url: String) -> CreateEmbed {
+    let mut embed = CreateEmbed::default();
+    embed.url(url);
+    embed.image(attachment.url.clone()).clone()
+}
 
-//     Ok((names, Some(files)))
-// }
+// create vector of only images from attachments
+fn extract_images(attachments: &Vec<Attachment>) -> Vec<&Attachment> {
+    let mut files: Vec<&Attachment> = vec![];
+    for attachment in attachments {
+        if is_image(attachment) {
+            files.push(attachment);
+        }
+    }
+    files
+}
+
+// create vector of non-images from attachments
+fn extract_nonimages(attachments: &Vec<Attachment>) -> Vec<&Attachment> {
+    let mut files: Vec<&Attachment> = vec![];
+    for attachment in attachments {
+        if !is_image(attachment) {
+            files.push(attachment);
+        }
+    }
+    files
+}
+
+fn is_image(attachment: &Attachment) -> bool {
+    attachment.content_type.as_ref().unwrap().split("/").collect::<Vec<&str>>()[0] == "image"
+}
