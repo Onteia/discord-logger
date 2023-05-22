@@ -25,6 +25,7 @@ use std::fs;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::path::Path;
+use std::sync::Mutex;
 
 const DISCORD_AUTH_PATH: &'static str = "discord.auth";
 const JSON_PATH: &'static str = "./servers.json";
@@ -64,7 +65,19 @@ struct LogInfo {
     ctx: Context,
 }
 
-struct Handler;
+struct Handler {
+    map: Mutex<HashMap<String, u64>>,
+}
+
+impl Handler {
+    fn new() -> Self {
+        let map: HashMap<String, u64> = read_json().unwrap();
+
+        Handler {
+            map: Mutex::new(map),
+        }
+    }
+}
 
 #[async_trait]
 impl EventHandler for Handler {
@@ -112,11 +125,9 @@ impl EventHandler for Handler {
                     .to_string();
 
                 //update the save_map with the new server,channel pair
-                let mut save_map = read_json()
-                    .expect((INIT_LOG.to_owned() + ": unable to read from json!").as_str());
-                save_map.insert(g_id_str, c_id);
-
-                write_json(&save_map)
+                self.map.lock().unwrap().insert(g_id_str, c_id);
+                //update the json file
+                write_json(&*self.map.lock().unwrap())
                     .expect((INIT_LOG.to_owned() + ": unable to write to json file!").as_str());
 
                 slash_command
@@ -139,6 +150,9 @@ impl EventHandler for Handler {
                     .to_string();
 
                 //remove from map and update json
+                {
+                    let _map = self.map.lock().unwrap().remove(&g_id_str);
+                }
                 match delete_entry(&g_id_str) {
                     //send success message
                     Some(_id) => {
@@ -183,17 +197,24 @@ impl EventHandler for Handler {
             .expect("message(): unable to get the guild_id!");
         let g_id_str = g_id.to_string();
 
-        let save_map = read_json().expect("message(): unable to read from json!");
-
         //ignore messages if logging not set up
-        if !save_map.contains_key(&g_id_str) {
+        if {
+            let m = self.map.lock().unwrap();
+            !m.contains_key(&g_id_str)
+        } {
             return;
         }
 
         //get the channel id associated with the guild id
-        let c_id = *save_map
-            .get(&g_id_str)
-            .expect("message(): unable to get the channel id from the hash map!");
+        let c_id = {
+            *self
+                .map
+                .lock()
+                .unwrap()
+                .get(&g_id_str)
+                .expect("message(): unable to get the channel id from the hash map!")
+        };
+
         //turn the c_id into a guild channel
         let log_channel = ctx
             .http
@@ -262,15 +283,13 @@ impl EventHandler for Handler {
 
         let g_id_str = g_id.to_string();
 
-        let save_map = read_json().expect("message_update(): unable to read from json!");
-
         //ignore messages if logging not set up
-        if !save_map.contains_key(&g_id_str) {
+        if !(*self.map.lock().unwrap()).contains_key(&g_id_str) {
             return;
         }
 
         //get the channel id associated with the guild id
-        let c_id = *save_map
+        let c_id = *(*self.map.lock().unwrap())
             .get(&g_id_str)
             .expect("message_update(): unable to get the channel id from the hash map!");
         //turn the c_id into a guild channel
@@ -368,9 +387,11 @@ async fn setup_bot() {
         | GatewayIntents::MESSAGE_CONTENT
         | GatewayIntents::GUILD_MEMBERS;
 
+    let handler = Handler::new();
+
     //build the client
     let mut client = Client::builder(token, intents)
-        .event_handler(Handler)
+        .event_handler(handler)
         .await
         .expect("error creating client!");
 
@@ -462,11 +483,11 @@ fn delete_entry(g_id: &String) -> Option<u64> {
 
 async fn log_message(log_info: LogInfo) {
     let embed = create_embed(&log_info);
-    let attachments = match log_info.attachments{
+    let attachments = match log_info.attachments {
         Some(list) => list,
         None => vec![],
     };
-    
+
     let images = extract_images(&attachments);
     let files = extract_nonimages(&attachments);
 
@@ -478,10 +499,13 @@ async fn log_message(log_info: LogInfo) {
                     return r.set_embed(embed);
                 } else {
                     let mut embeds = vec![embed];
-                    // set image embeds for all images except first
-                    // because first image is part of the first embed
+                    //set image embeds for all images except first
+                    //because first image is part of the first embed
                     for index in 1..images.len() {
-                        embeds.push(create_image_embed(&images[index], log_info.msg_link.clone()));
+                        embeds.push(create_image_embed(
+                            &images[index],
+                            log_info.msg_link.clone(),
+                        ));
                     }
                     return r.add_embeds(embeds);
                 }
@@ -493,12 +517,12 @@ async fn log_message(log_info: LogInfo) {
         for file in files {
             let bytes = match file.download().await {
                 Ok(b) => b,
-                Err(_) => vec![], 
+                Err(_) => vec![],
             };
 
             let at: AttachmentType = AttachmentType::Bytes {
-                data: Cow::Owned(bytes), 
-                filename: file.filename.clone() 
+                data: Cow::Owned(bytes),
+                filename: file.filename.clone(),
             };
             to_upload.push(at);
         }
@@ -510,10 +534,13 @@ async fn log_message(log_info: LogInfo) {
                     return r.set_embed(embed);
                 } else {
                     let mut embeds = vec![embed];
-                    // set image embeds for all images except first
-                    // because first image is part of the first embed
+                    //set image embeds for all images except first
+                    //because first image is part of the first embed
                     for index in 1..images.len() {
-                        embeds.push(create_image_embed(&images[index], log_info.msg_link.clone()));
+                        embeds.push(create_image_embed(
+                            &images[index],
+                            log_info.msg_link.clone(),
+                        ));
                     }
                     return r.add_embeds(embeds);
                 }
@@ -547,10 +574,10 @@ fn create_embed(log_info: &LogInfo) -> CreateEmbed {
             a.icon_url(&log_info.author_face)
         });
 
-    // log the first image attachment in this embed so all images are logged
+    //log the first image attachment in this embed so all images are logged
     let images = extract_images(log_info.attachments.as_ref().unwrap());
     if images.len() > 0 {
-        // set first image as this embed's displayed image
+        //set first image as this embed's displayed image
         embed.field("with image(s):", "", false);
         embed.image(images[0].url.clone());
     }
@@ -563,7 +590,7 @@ fn create_image_embed(attachment: &Attachment, url: String) -> CreateEmbed {
     embed.image(attachment.url.clone()).clone()
 }
 
-// create vector of only images from attachments
+//create vector of only images from attachments
 fn extract_images(attachments: &Vec<Attachment>) -> Vec<&Attachment> {
     let mut files: Vec<&Attachment> = vec![];
     for attachment in attachments {
@@ -574,7 +601,7 @@ fn extract_images(attachments: &Vec<Attachment>) -> Vec<&Attachment> {
     files
 }
 
-// create vector of non-images from attachments
+//create vector of non-images from attachments
 fn extract_nonimages(attachments: &Vec<Attachment>) -> Vec<&Attachment> {
     let mut files: Vec<&Attachment> = vec![];
     for attachment in attachments {
@@ -586,5 +613,11 @@ fn extract_nonimages(attachments: &Vec<Attachment>) -> Vec<&Attachment> {
 }
 
 fn is_image(attachment: &Attachment) -> bool {
-    attachment.content_type.as_ref().unwrap().split("/").collect::<Vec<&str>>()[0] == "image"
+    attachment
+        .content_type
+        .as_ref()
+        .unwrap()
+        .split("/")
+        .collect::<Vec<&str>>()[0]
+        == "image"
 }
