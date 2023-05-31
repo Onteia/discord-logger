@@ -324,9 +324,11 @@ impl EventHandler for Handler {
         let updated_text = updated
             .content
             .expect("message_update(): unable to get the updated message!");
-        let time = updated
-            .timestamp
-            .expect("message_update(): unable to get timestamp of original message!");
+        let time = match updated
+            .timestamp {
+                Some(timestamp) => timestamp,
+                None => Timestamp::now()
+            };
         let display_color = color_hash(&channel_name, &author.tag(), time);
         let edited_time = updated
             .edited_timestamp
